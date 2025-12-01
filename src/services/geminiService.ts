@@ -1,4 +1,3 @@
-
 import { productDatabase } from '../data/productData';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../../amplify/data/resource';
@@ -9,25 +8,40 @@ const client = generateClient<Schema>();
 const databaseString = JSON.stringify(productDatabase.map(p => ({ brand: p.brand, model: p.model, description: p.description, category: p.category, price: p.price })));
 
 // Helper to call backend function
-async function callGeminiBackend(prompt: string, responseSchema?: object) {
-    const fullPrompt = `${prompt}\n\nCustom Product Database: ${databaseString}`;
+async function callGeminiBackend(prompt: string, systemInstruction?: string, responseSchema?: object) {
+    // Append DB string to user prompt for context (safest approach for RAG-like behavior in simple prompts)
+    // Note: In a larger system, RAG would be handled by a vector store.
+    const fullPrompt = `${prompt}\n\nCustom Product Database Reference:\n${databaseString}`;
 
     const response = await client.queries.generateBoqContent({
         prompt: fullPrompt,
+        systemInstruction: systemInstruction,
         responseSchema: responseSchema ? JSON.stringify(responseSchema) : undefined
     });
+
+    if (response.errors) {
+        throw new Error(response.errors[0].message);
+    }
 
     if (!response.data) {
         throw new Error("No data returned from AI service");
     }
     
-    // The backend returns a stringified JSON
+    // The backend returns a stringified JSON (or plain text)
     let text = response.data;
+    // Cleanup markdown code blocks if present
     if (text.startsWith('```json')) {
         text = text.replace(/^```json\n/, '').replace(/\n```$/, '');
+    } else if (text.startsWith('```')) {
+        text = text.replace(/^```\n/, '').replace(/\n```$/, '');
     }
     
-    return JSON.parse(text);
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        console.error("Failed to parse JSON response:", text);
+        throw new Error("AI response was not valid JSON.");
+    }
 }
 
 /**
@@ -69,21 +83,28 @@ export const generateBoq = async (answers: Record<string, any>): Promise<Boq> =>
       .filter(Boolean)
       .join('; ');
 
-    const prompt = `You are a world-class, Senior AV Solutions Architect (CTS-D Certified). Generate a BOQ.
-    
-    CLIENT CONFIGURATION: "${requirements}"
+    const systemInstruction = `You are a world-class, Senior AV Solutions Architect (CTS-D Certified). 
+Your goal is to generate a **100% production-ready, logically flawless Bill of Quantities (BOQ)** that adheres strictly to AVIXA standards and User Brand Requests.
 
-    MANDATORY BRAND COMPLIANCE:
-    * Displays: ${brandPreferences.displays}
-    * Mounts: ${brandPreferences.mounts}
-    * Racks: ${brandPreferences.racks}
-    * Audio: ${brandPreferences.audio}
-    * VC: ${brandPreferences.vc}
-    * Control: ${brandPreferences.control}
+**CRITICAL RULES:**
+1.  **BRAND LOCK:** Strictly adhere to the brand constraints listed in the prompt.
+2.  **LOGICAL SIGNAL FLOW:** Ensure every source has a destination, every display has a mount, and cabling is included.
+3.  **DATABASE PRIORITY:** Use the provided Custom Product Database whenever possible.
+4.  **JUSTIFICATION:** Populate 'keyRemarks' with reasons for selection.
+`;
 
-    Generate items ONLY for these categories: ${allowedCategories.join(', ')}.
-    Return a JSON array of objects with keys: category, itemDescription, keyRemarks, brand, model, quantity, unitPrice, totalPrice, source ('database'|'web'), priceSource ('database'|'estimated').
-    `;
+    const prompt = `CLIENT CONFIGURATION: "${requirements}"
+
+MANDATORY BRAND COMPLIANCE (ZERO TOLERANCE):
+*   Displays: ${brandPreferences.displays || 'Professional defaults'}
+*   Mounts: ${brandPreferences.mounts || 'Professional defaults'}
+*   Racks: ${brandPreferences.racks || 'Professional defaults'}
+*   Audio: ${brandPreferences.audio || 'Professional defaults'}
+*   VC: ${brandPreferences.vc || 'Professional defaults'}
+*   Control: ${brandPreferences.control || 'Professional defaults'}
+
+Scope Limit: Generate items ONLY for these categories: ${allowedCategories.join(', ')}.
+`;
 
     // Response schema matching the Type used in frontend, passed to backend
     const responseSchema = {
@@ -106,7 +127,7 @@ export const generateBoq = async (answers: Record<string, any>): Promise<Boq> =>
         },
     };
 
-    const result = await callGeminiBackend(prompt, responseSchema);
+    const result = await callGeminiBackend(prompt, systemInstruction, responseSchema);
     
     return result.map((item: BoqItem) => ({
         ...item,
@@ -118,7 +139,8 @@ export const generateBoq = async (answers: Record<string, any>): Promise<Boq> =>
  * Refines an existing BOQ based on a user-provided prompt.
  */
 export const refineBoq = async (currentBoq: Boq, refinementPrompt: string): Promise<Boq> => {
-    const prompt = `Refine this BOQ: ${JSON.stringify(currentBoq)}. User Request: "${refinementPrompt}". Return the updated JSON array.`;
+    const systemInstruction = "You are an expert AV System Engineer. Refine the BOQ based on the user's specific request while maintaining system integrity.";
+    const prompt = `Refine this BOQ: ${JSON.stringify(currentBoq)}. \n\nUser Request: "${refinementPrompt}". \n\nReturn the updated JSON array.`;
     
     const responseSchema = {
         type: "ARRAY",
@@ -140,7 +162,7 @@ export const refineBoq = async (currentBoq: Boq, refinementPrompt: string): Prom
         },
     };
 
-    const result = await callGeminiBackend(prompt, responseSchema);
+    const result = await callGeminiBackend(prompt, systemInstruction, responseSchema);
     return result.map((item: BoqItem) => ({
         ...item,
         totalPrice: item.quantity * item.unitPrice
@@ -151,7 +173,8 @@ export const refineBoq = async (currentBoq: Boq, refinementPrompt: string): Prom
  * Validates a BOQ.
  */
 export const validateBoq = async (boq: Boq, requirements: string): Promise<any> => {
-    const prompt = `Audit this BOQ: ${JSON.stringify(boq)}. Requirements: "${requirements}". Return JSON validation result.`;
+    const systemInstruction = "You are an expert AV system design auditor (CTS-D). Analyze the BOQ for signal flow gaps, missing mounts, and brand compliance violations.";
+    const prompt = `Audit this BOQ: ${JSON.stringify(boq)}. \n\nOriginal Requirements: "${requirements}". \n\nReturn JSON validation result.`;
     
     const responseSchema = {
         type: "OBJECT",
@@ -164,15 +187,16 @@ export const validateBoq = async (boq: Boq, requirements: string): Promise<any> 
         required: ['isValid', 'warnings', 'suggestions', 'missingComponents'],
     };
 
-    return await callGeminiBackend(prompt, responseSchema);
+    return await callGeminiBackend(prompt, systemInstruction, responseSchema);
 };
 
-// Note: Using simple generation for product details to avoid complex tool chaining in the initial backend setup.
 export const fetchProductDetails = async (productName: string): Promise<ProductDetails> => {
     const prompt = `Provide a technical description for: "${productName}". Start with description. End with "IMAGE_URL: [url]" if you know one.`;
     // We reuse the generic generation query without schema for freeform text
+    const client = generateClient<Schema>();
     const response = await client.queries.generateBoqContent({
         prompt: prompt,
+        systemInstruction: "You are a helpful product research assistant.",
         responseSchema: undefined
     });
     

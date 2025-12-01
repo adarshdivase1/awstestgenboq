@@ -7,5 +7,5 @@ export const generateBoqFunction = defineFunction({
   environment: {
     GEMINI_API_KEY: secret('GEMINI_API_KEY'), 
   },
-  timeoutSeconds: 60, // Allow time for GenAI to think
+  timeoutSeconds: 300, // Increased to 5 minutes for complex GenAI tasks
 });
