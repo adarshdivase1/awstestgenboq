@@ -13,7 +13,7 @@
   "dependencies": {
     "@aws-amplify/ui-react": "^6.1.0",
     "aws-amplify": "^6.0.10",
-    "@google/genai": "^0.1.0",
+    "@google/genai": "latest",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "uuid": "^9.0.1",
